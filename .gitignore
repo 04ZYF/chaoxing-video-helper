@@ -3,6 +3,7 @@ diag_*.js
 explore*.js
 cdp*.mjs
 *.png
+!screenshot-panel.png
 addPoint.js
 manual_play.js
 verify_play.js
