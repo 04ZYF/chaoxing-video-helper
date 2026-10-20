@@ -1,15 +1,28 @@
 // ==UserScript==
 // @name         学习通视频自动播放助手
 // @namespace    cx-video-helper
-// @version      1.4.3
+// @version      1.4.5
 // @description  自动播放、静音、倍速保持、关闭挂机弹窗、播完自动下一节（视频+文档任务点）。仅辅助播放/阅读，不代答测验/考试。
 // @match        *://*.chaoxing.com/*
-// @run-at       document-end
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 (function () {
   'use strict';
+
+  /* ---------- 关键：最早把 document.domain 放宽到 chaoxing.com ----------
+     学习通顶层页面会把自己的 document.domain 设成 chaoxing.com，但内嵌的
+     cards 内容 iframe 只在其"读到顶层 domain 抛错"时才走 catch 也设成
+     chaoxing.com。若顶层放宽太晚（document-end），cards 已按 mooc1.chaoxing.com
+     初始化 → 顶层(chaoxing.com)与 cards(mooc1.chaoxing.com) 变成跨域 → 脚本
+     读不到视频 → 一会能读一会不能读，反复"刷第一个/第二个视频"。
+     所以必须在 document-start 最早把顶层 domain 设成 chaoxing.com，
+     让 cards 的 domain.js 走 catch 分支同步放宽，两端对齐同源。
+  -------------------------------------------------- */
+  try {
+    document.domain = location.hostname.split('.').slice(-2).join('.');
+  } catch (e) { /* 已设过或不可设则忽略 */ }
 
   // ================= 配置（可改） =================
   const CFG = {
@@ -19,6 +32,8 @@
     closePopup: true,  // 自动关闭“是否还在学习”弹窗
     waitJobs: true,    // 跳下一节前等待所有任务点完成
     finishDocs: true,  // 自动完成文档任务点（PPT/PDF：调 finishJob，实测有效）
+    pollMs: 5000,      // 主循环间隔（毫秒）。加大可降低操作频率，减少触发 9010 风控
+    noVideoJumpMs: 15000, // 无视频小节跳节前的等待（毫秒）
   };
   // ================================================
 
@@ -186,7 +201,7 @@
       'font:12px/1.8 system-ui,sans-serif;display:flex;flex-direction:column;user-select:none;' +
       'box-shadow:0 2px 10px rgba(0,0,0,.4)';
     p.innerHTML =
-      '<b style="font-size:13px">学习通助手 v1.4.3</b>' +
+      '<b style="font-size:13px">学习通助手 v1.4.5</b>' +
       '<label><input type="checkbox" id="cxh-mute"' + (CFG.mute ? ' checked' : '') + '> 自动静音</label>' +
       '<label>倍速 <select id="cxh-rate" style="color:#000">' +
         [1, 1.25, 1.5].map(r => '<option value="' + r + '"' + (CFG.rate === r ? ' selected' : '') + '>' + r + 'x</option>').join('') +
@@ -257,7 +272,7 @@
       // 若有未完成文档任务点（纯 PPT/PDF 小节），先自动完成再跳
       if (finishDocJobs()) { setStatus('完成文档任务点…', true); return; }
       const hasVideoModule = [...cd.querySelectorAll('iframe')].some(f => /\/ananas\/modules\/video\//.test(f.src || ''));
-      if (CFG.autoNext && !hasVideoModule && Date.now() - lastNav > 10000 && !navBusy) {
+      if (CFG.autoNext && !hasVideoModule && Date.now() - lastNav > CFG.noVideoJumpMs && !navBusy) {
         if (quizPresent()) { setStatus('检测到测验/作业，自动跳过已暂停', true); return; }
         lastNav = Date.now();
         console.log(TAG, '本节无视频，跳下一节');
@@ -266,17 +281,25 @@
       return;
     }
 
-    // 有视频：逐个应用静音/倍速，恢复暂停的视频（多个视频并发累积观看时长）
+    // 有视频：对每个视频应用静音/倍速（不动播放状态，避免多视频并发互相顶掉）
     for (const v of videos) {
       if (CFG.mute) v.muted = true;
       if (Math.abs(v.playbackRate - CFG.rate) > 0.01) v.playbackRate = CFG.rate;
-      if (v.paused && !(v.ended && v.duration > 0)) {
-        v.play().catch(e => console.log(TAG, 'play() 被拒绝:', e.name, e.message));
-      }
+    }
+
+    // 串行播放：同一时刻只让一个视频播，播完一个再播下一个。
+    // 学习通同一卡片里的多个视频是 videojs 堆叠的，同时 play() 会互相顶掉，
+    // 造成"一会播第一个一会播第二个"来回切换。所以按顺序播。
+    const notEnded = videos.filter(v => !(v.ended && v.duration > 0));
+    const anyPlaying = notEnded.some(v => !v.paused);
+    if (!anyPlaying && notEnded.length) {
+      // 找到第一个还没结束的视频，只播它（其余保持暂停）
+      const target = notEnded[0];
+      target.play().catch(e => console.log(TAG, 'play() 被拒绝:', e.name, e.message));
     }
 
     // 所有视频都播完 → 检查任务点 → 跳下一节
-    const ended = videos.every(v => v.ended);
+    const ended = videos.every(v => v.ended && v.duration > 0);
     if (ended && CFG.autoNext && !navBusy) {
       if (quizPresent()) { setStatus('检测到测验/作业，停在当前小节', true); return; }
       const jobs = jobStats(document, null, 0);
@@ -294,9 +317,10 @@
 
     // 常规状态行
     if (Date.now() > statusHoldUntil) {
-      const playing = videos.filter(v => !v.paused && !v.ended).length;
-      const v0 = videos.find(v => !v.ended) || videos[0];
+      const notEnded = videos.filter(v => !(v.ended && v.duration > 0));
+      const playing = notEnded.filter(v => !v.paused).length;
+      const v0 = notEnded[0] || videos[0];
       setStatus('▶ ' + playing + '/' + videos.length + ' 在播 ' + fmt(v0.currentTime) + '/' + fmt(v0.duration || 0));
     }
-  }, 3000);
+  }, CFG.pollMs);
 })();
