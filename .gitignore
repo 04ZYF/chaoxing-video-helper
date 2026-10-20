@@ -1,0 +1,19 @@
+# 调试诊断文件（含个人课程/账号信息，勿提交）
+diag_*.js
+explore*.js
+cdp*.mjs
+*.png
+addPoint.js
+manual_play.js
+verify_play.js
+watch_loop.js
+fix_reload.js
+reload_page.js
+read_ask.js
+accept_ask.js
+save_script.js
+find_save.js
+open_editor*.js
+open_tm_*.mjs
+shot_*.mjs
+allow_userscripts.mjs
